@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cascade Sim</title>
+  <meta name="description" content="Simulate how one slow dependency takes down a microservice system, and how timeouts, retries, circuit breakers, bulkheads, load shedding, and fallbacks contain it.">
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>Cascade Sim</h1>
+      <p class="sub">One slow dependency, a fixed pool of worker threads, and the patterns that stop the failure from spreading. Every request is simulated.</p>
+    </div>
+    <div class="actions">
+      <button type="button" id="share">Copy share link</button>
+      <button type="button" id="reset" class="ghost">Reset</button>
+    </div>
+  </header>
+
+  <section class="presets-wrap">
+    <div class="presets" id="presets" role="group" aria-label="Presets"></div>
+    <p class="hint" id="preset-note"></p>
+  </section>
+
+  <main class="layout">
+    <form id="form" class="panel" autocomplete="off">
+      <fieldset>
+        <legend>Scenario</legend>
+        <label>Topology<select name="topo"></select></label>
+        <div class="grid2">
+          <label>Traffic (req/s)<input type="number" name="rps" min="1" max="400" step="10"></label>
+          <label>Duration (s)<input type="number" name="durationS" min="10" max="120" step="5"></label>
+          <label>Users give up after (ms)<input type="number" name="userTimeoutMs" min="100" step="100"></label>
+          <label>Random seed<input type="number" name="seed" min="0" step="1"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Fault</legend>
+        <div class="grid2">
+          <label>Service<select name="faultSvc"></select></label>
+          <label>Kind<select name="faultKind"><option value="slow">Slow</option><option value="error">Errors</option></select></label>
+          <label>From (s)<input type="number" name="faultStartS" min="0" step="1"></label>
+          <label>To (s)<input type="number" name="faultEndS" min="0" step="1"></label>
+          <label data-kind="slow">Latency multiplier<input type="number" name="faultFactor" min="1" step="1"></label>
+          <label data-kind="error">Error rate (0 to 1)<input type="number" name="faultErrorRate" min="0" max="1" step="0.05"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Patterns per service</legend>
+        <div class="tabs" id="svc-tabs" role="tablist"></div>
+        <p class="field-hint" id="svc-desc"></p>
+        <div class="grid2" id="policy">
+          <label>Worker pool<input type="number" data-pol="workers" min="1" step="1"></label>
+          <label>Call timeout (ms, 0 = none)<input type="number" data-pol="timeoutMs" min="0" step="50"></label>
+          <label>Retries per call<input type="number" data-pol="retries" min="0" max="10" step="1"></label>
+          <label>Bulkhead per dependency (0 = off)<input type="number" data-pol="bulkhead" min="0" step="1"></label>
+          <label>Queue limit (0 = unbounded)<input type="number" data-pol="queueLimit" min="0" step="10"></label>
+        </div>
+        <label class="check"><input type="checkbox" data-pol="backoff">Exponential backoff with jitter between retries</label>
+        <label class="check"><input type="checkbox" data-pol="breaker">Circuit breaker on each outbound call</label>
+        <label class="check"><input type="checkbox" data-pol="fallback">Fallback when a non-critical call fails</label>
+      </fieldset>
+      <fieldset>
+        <legend>Breaker and backoff</legend>
+        <div class="grid2">
+          <label>Open at error rate<input type="number" name="breakerThreshold" min="0.05" max="1" step="0.05"></label>
+          <label>Window (calls)<input type="number" name="breakerWindow" min="1" step="5"></label>
+          <label>Cooldown (ms)<input type="number" name="breakerCooldownMs" min="0" step="500"></label>
+          <label>Trial calls<input type="number" name="breakerProbes" min="1" step="1"></label>
+          <label>Backoff base (ms)<input type="number" name="backoffMs" min="0" step="10"></label>
+        </div>
+      </fieldset>
+      <p class="hint">Each service holds a worker for the whole request, including the time it waits on downstream calls. Latency is lognormal. Arrivals are Poisson and reproducible from the seed.</p>
+    </form>
+
+    <section class="results">
+      <div class="cards" id="cards"></div>
+
+      <div class="panel">
+        <div class="chart-head">
+          <h2>Topology at <span id="diag-time"></span></h2>
+          <ul class="legend">
+            <li><i class="swatch h-good"></i>Healthy</li>
+            <li><i class="swatch h-warn"></i>Saturated</li>
+            <li><i class="swatch h-bad"></i>Failing</li>
+            <li><i class="linekey dashed"></i>Non-critical call</li>
+          </ul>
+        </div>
+        <svg id="diagram" role="img" aria-label="Service topology colored by health"></svg>
+        <p class="hint">Edge width is calls per second. Hover any chart to move the diagram to that second.</p>
+      </div>
+
+      <div class="panel">
+        <div class="chart-head">
+          <h2>Over time</h2>
+          <ul class="legend">
+            <li><i class="swatch fault"></i>Fault window</li>
+            <li><i class="swatch b-half"></i>Breaker half-open</li>
+            <li><i class="swatch b-open"></i>Breaker open</li>
+          </ul>
+        </div>
+        <div class="multiples">
+          <div class="chart-wrap"><h3>Success rate at the edge</h3><svg id="c-success" class="chart" role="img" aria-label="Edge success rate per second"></svg><div class="tooltip" hidden></div></div>
+          <div class="chart-wrap"><h3>p99 latency seen by users</h3><svg id="c-p99" class="chart" role="img" aria-label="p99 latency per second"></svg><div class="tooltip" hidden></div></div>
+          <div class="chart-wrap"><h3>Worker pool in use, per service</h3><svg id="c-util" class="chart" role="img" aria-label="Pool utilization per service"></svg><div class="tooltip" hidden></div></div>
+          <div class="chart-wrap"><h3>Circuit breaker state, per call</h3><svg id="c-breaker" class="chart" role="img" aria-label="Breaker state per call"></svg><div class="tooltip" hidden></div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Per service</h2>
+        <div class="table-scroll">
+          <table class="items">
+            <thead><tr><th>Service</th><th class="num">Requests</th><th class="num">Success</th><th class="num">p50</th><th class="num">p99</th><th class="num">Max queue</th><th class="num">Retries sent</th><th class="num">Timeouts</th><th class="num">Shed or failed fast</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p class="hint" id="note"></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">Runs entirely in your browser. Settings are stored in the page URL so you can share a scenario.</footer>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
